@@ -1,0 +1,190 @@
+#include <nrk.h>
+#include <include.h>
+#include <ulib.h>
+#include <stdio.h>
+#include <hal.h>
+#include <nrk_error.h>
+#include <nrk_timer.h>
+#include <nrk_stack_check.h>
+#include <nrk_stats.h>
+#include <string.h>
+#include "mbed.h"
+#include "basic_rf.h"
+#include "bmac.h"
+
+//#define SEND
+#define RECEIVE
+#define PRINT
+
+
+nrk_task_type RX_TASK;
+NRK_STK rx_task_stack[NRK_APP_STACKSIZE];
+void rx_task (void);
+
+nrk_task_type TX_TASK;
+NRK_STK tx_task_stack[NRK_APP_STACKSIZE];
+void tx_task (void);
+
+nrk_task_type PRINT_TASK;
+NRK_STK print_task_stack[NRK_APP_STACKSIZE];
+void print_task (void);
+
+void nrk_create_taskset ();
+
+char tx_buf[RF_MAX_PAYLOAD_SIZE];
+char rx_buf[RF_MAX_PAYLOAD_SIZE];
+
+RF_RX_INFO rfRxInfo;
+RF_TX_INFO rfTxInfo;
+
+uint8_t rx_buf_empty = 1;
+
+// Counter for number of detected packets that have valid data
+static uint16_t rxContentSuccess = 0;
+// Counter for number of total detected packets
+static uint16_t rxTotal = 0;
+// Counter for number of detected packets from the preamble perspective, regardless of contents
+static uint16_t mrfRxISRcallbackCounter = 0;
+// Flag for if NODE2 received correctly from NODE1, if true then NODE2 relays to NODE3
+static uint16_t N1rec = 0;
+
+// Count number of detected packets and toggle a pin for each packet
+void mrfIsrCallback()
+{		
+	nrk_led_toggle(ORANGE_LED);
+	mrfRxISRcallbackCounter++;
+	rx_buf_empty = 0;
+}
+
+int main(void)
+{	
+	nrk_setup_ports();
+	
+	rfRxInfo.pPayload = rx_buf;
+	rfRxInfo.max_length = RF_MAX_PAYLOAD_SIZE;
+	rf_init(&rfRxInfo, RADIO_CHANNEL, 0xFFFF, MAC_ADDR); //RX struct, channel, panId, myAddr
+	//rf_addr_decode_set_my_mac(0x0003); // function to set myAddr if not performed during init
+	//rf_data_mode();
+	//rf_auto_ack_enable(); // enable if IEEE 802.15.4 ack packets are requested
+	rf_auto_ack_disable();
+	
+	nrk_init();
+	nrk_create_taskset();
+  nrk_start();
+	return 0;
+}
+
+void rx_task ()
+{
+  while (1)
+	{
+    // Wait until an RX packet is received
+    if(!rx_buf_empty)
+		{		
+			// Vuk: Rx content test
+			if (strncmp(rx_buf, "Node1", 41) == 0)
+			{
+				nrk_led_toggle(BLUE_LED);
+				rxContentSuccess++;
+				tx_task();
+				//printf("Correct packets: %d\n", rxContentSuccess);
+				//N1rec = 1;
+			}
+			rxTotal++;
+			rx_buf_empty = 1;
+		}
+		nrk_wait_until_next_period ();
+  }
+}
+
+void tx_task ()
+{
+
+		sprintf (tx_buf, "Node2");
+		rfTxInfo.pPayload=tx_buf;
+		rfTxInfo.length=strlen(tx_buf);
+		rfTxInfo.destAddr = 0xF00B; // destination node address
+		
+		int packetsToSend = 1;
+		int sentPackets = 0;
+		while(packetsToSend!=0)
+		{
+			rf_rx_off();
+			rf_tx_packet(&rfTxInfo);
+			rf_rx_on();
+			
+			nrk_led_toggle(ORANGE_LED);
+			
+			packetsToSend--;
+			sentPackets++;
+			//N1rec = 0;
+		
+			//nrk_wait_until_next_period ();
+		}
+	
+}
+
+void print_task () {
+	
+	while(1) {
+			printf("rx_buf: %s\n", rx_buf);
+			printf("Correct packets: %d\n", rxContentSuccess);
+			//printf("Total packets: %d\n", rxTotal);
+			nrk_wait_until_next_period();
+	}
+	
+}
+
+void nrk_create_taskset ()
+{
+	// Separately activate Tx task on one node, and Rx task on the other
+	// or both if congestion operation is desirable
+
+  RX_TASK.task = rx_task;
+  nrk_task_set_stk( &RX_TASK, rx_task_stack, NRK_APP_STACKSIZE);
+  RX_TASK.prio = 2;
+  RX_TASK.FirstActivation = TRUE;
+  RX_TASK.Type = BASIC_TASK;
+  RX_TASK.SchType = PREEMPTIVE;
+  RX_TASK.period.secs = 0;
+  RX_TASK.period.nano_secs = 50*NANOS_PER_MS;
+  RX_TASK.cpu_reserve.secs = 0;
+  RX_TASK.cpu_reserve.nano_secs = 0;
+  RX_TASK.offset.secs = 0;
+  RX_TASK.offset.nano_secs = 0;
+	#ifdef RECEIVE
+		nrk_activate_task (&RX_TASK);
+	#endif
+
+  TX_TASK.task = tx_task;
+  nrk_task_set_stk( &TX_TASK, tx_task_stack, NRK_APP_STACKSIZE);
+  TX_TASK.prio = 2;
+  TX_TASK.FirstActivation = TRUE;
+  TX_TASK.Type = BASIC_TASK;
+  TX_TASK.SchType = PREEMPTIVE;
+  TX_TASK.period.secs = 0;
+  TX_TASK.period.nano_secs = 100*NANOS_PER_MS;
+  TX_TASK.cpu_reserve.secs = 0;
+  TX_TASK.cpu_reserve.nano_secs = 0;
+  TX_TASK.offset.secs = 0;
+  TX_TASK.offset.nano_secs = 0;
+	#ifdef SEND
+		nrk_activate_task (&TX_TASK);
+	#endif
+	
+	PRINT_TASK.task = print_task;
+	nrk_task_set_stk( &PRINT_TASK, print_task_stack, NRK_APP_STACKSIZE);
+	PRINT_TASK.prio = 2;
+  PRINT_TASK.FirstActivation = TRUE;
+  PRINT_TASK.Type = BASIC_TASK;
+  PRINT_TASK.SchType = PREEMPTIVE;
+  PRINT_TASK.period.secs = 0;
+  PRINT_TASK.period.nano_secs = 100*NANOS_PER_MS;
+  PRINT_TASK.cpu_reserve.secs = 0;
+  PRINT_TASK.cpu_reserve.nano_secs = 0;
+  PRINT_TASK.offset.secs = 0;
+  PRINT_TASK.offset.nano_secs = 0;
+	#ifdef PRINT
+		nrk_activate_task (&PRINT_TASK);
+	#endif
+}
